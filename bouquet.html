@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+</head>
+<body>
+<title>ASCII Bouquet</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+<!--Edit the root for personalized colors-->
+<!--Go down to "var TONES" to edit features like the middle 
+part of flowers to be a certain color that is defined here-->
+<style>
+:root {
+    --ink: #170b1d; 
+    --white: #fff4f8;
+    --pink: #ff86bd;
+    --hot: #e8458f;
+    --leaf: #46b58c;
+    --paper: #b9a3e6;
+    --dim: #a48fb2;
+    --display: "Press Start 2P", ui-monospace, "Courier New", monospace;
+    --body: "Space Mono", ui-monospace, "Courier New", monospace;
+    color-scheme: dark;
+  }
+  html { height: 100%; background: var(--ink); }
+  body {
+    margin: 0;
+    min-height: 100%;
+    box-sizing: border-box;
+    background: var(--ink);
+    color: var(--white);
+    font-family: var(--body);
+    padding-block: 20px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .stage {
+    display: grid;
+    justify-items: center;
+    gap: 18px;
+    width: 100%;
+    min-width: 0;
+  }
+  canvas { display: block; background: var(--ink); }
+  .note {
+    display: grid;
+    justify-items: center;
+    gap: 10px;
+    width: 100%;
+    max-width: 34rem;
+    min-width: 0;
+    text-align: center;
+  }
+  h1 {
+    margin: 0;
+    font-family: var(--display);
+    font-weight: 400;
+    font-size: clamp(12px, 3.6vw, 16px);
+    line-height: 1.6;
+    letter-spacing: 0.02em;
+    color: var(--pink);
+    text-wrap: balance;
+  }
+  .bin {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--dim);
+    word-break: break-all;
+    max-width: 100%;
+  }
+  .bin .done { color: var(--white); font-size: 13px; }
+  .row { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+  button {
+    margin-top: 4px;
+    font: 700 12px/1 var(--body);
+    letter-spacing: 0.04em;
+    color: var(--pink);
+    background: transparent;
+    border: 2px solid var(--pink);
+    padding: 9px 16px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--pink); color: var(--ink); }
+  button:focus-visible { outline: 2px solid var(--white); outline-offset: 3px; }
+</style>
+
+<main class="stage">
+  <canvas id="bouquet" role="img" aria-label="A bouquet of pink and white flowers drawn entirely from zeros and ones, slowly turning"></canvas>
+  <section class="note">
+    <h1 id="msg"></h1>
+    <p class="bin" id="bin" aria-hidden="true"></p>
+    <div class="row">
+      <button type="button" id="decode">decode</button>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+/* EDIT HERE!! For personalized message, SECRET is the message below that is converted to binary code*/
+  var MESSAGE = "Thinking of you";
+  var SECRET = "Change the changeable and pray against the seemingly unchangable."
+
+  var COLS = 56, ROWS = 64;          
+  var SCALE = 27;                  
+  var CAM = 6;                       
+  var PITCH = 0.26;                  
+  var SPIN = 0.9;              
+  var TAU = Math.PI * 2;
+  var INK = "#170b1d";
+
+  var COL = {
+    white: [255, 244, 248],
+    pink:  [255, 2, 0],
+    hot:   [255, 20, 147],
+    leaf:  [70, 181, 140],
+    paper: [185, 163, 230],
+    yellow: [255, 255, 0]
+  };
+
+  /* ---------- tiny vector helpers ---------- */
+  function norm(v) { var l = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
+  function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+  function at(c, u, a, v, b, n, l) {
+    return [c[0] + u[0] * a + v[0] * b + n[0] * l,
+            c[1] + u[1] * a + v[1] * b + n[1] * l,
+            c[2] + u[2] * a + v[2] * b + n[2] * l];
+  }
+  function rng(seed) {
+    return function () {
+      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+      var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  var rand = rng(11);
+
+  /* ---------- the bouquet as a cloud of coloured points ---------- */
+  // each point: x y z, normal x y z, r g b, shade
+  var raw = [];
+  function add(p, n, c, sh) { raw.push(p[0], p[1], p[2], n[0], n[1], n[2], c[0], c[1], c[2], sh); }
+
+  function ellipse(c, a, ra, b, rb, n, col, shEdge, shMid, step) {
+    for (var i = -ra; i <= ra; i += step) {
+      for (var j = -rb; j <= rb; j += step) {
+        var q = (i / ra) * (i / ra) + (j / rb) * (j / rb);
+        if (q > 1) continue;
+        add(at(c, a, i, b, j, n, 0), n, col, shMid + (shEdge - shMid) * q);
+      }
+    }
+  }
+
+  function flower(c, n, len, petalCol, midCol, petals, spin) {
+    var ref = Math.abs(n[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+    var u = norm(cross(ref, n)), v = cross(n, u);
+    var step = 0.011, nt = Math.ceil(len / step), W = len * 0.2;
+    for (var i = 0; i < petals; i++) {
+      var ang = i / petals * TAU + spin;
+      var ca = Math.cos(ang), sa = Math.sin(ang);
+      var dir = [ca * u[0] + sa * v[0], ca * u[1] + sa * v[1], ca * u[2] + sa * v[2]];
+      var side = [-sa * u[0] + ca * v[0], -sa * u[1] + ca * v[1], -sa * u[2] + ca * v[2]];
+      var tone = (i & 1) ? 0.86 : 1;
+      for (var k = 1; k <= nt; k++) {
+        var t = k / nt;
+        var r = len * (0.14 + 0.86 * t);
+        var w = W * Math.sin(Math.PI * Math.pow(t, 0.7));
+        var ns = Math.max(1, Math.ceil(w * 2 / step));
+        for (var s = 0; s <= ns; s++) {
+          var q = (s / ns * 2 - 1) * w;
+          var lift = len * 0.22 * t * t + (q * q) / len * 0.9;
+          add(at(c, dir, r, side, q, n, lift), n, petalCol, (0.78 + 0.22 * t) * tone);
+        }
+      }
+    }
+    var cr = len * 0.2;
+    for (var rr = 0; rr <= cr; rr += step) {
+      var cnt = rr === 0 ? 1 : Math.ceil(TAU * rr / step);
+      for (var j = 0; j < cnt; j++) {
+        var a = j / cnt * TAU;
+        var f = rr / cr;
+        var lf = len * 0.07 + len * 0.05 * (1 - f * f);
+        add(at(c, u, Math.cos(a) * rr, v, Math.sin(a) * rr, n, lf), n, midCol, 1);
+      }
+    }
+  }
+
+  function leaf(base, az, elev, length, width) {
+    var ce = Math.cos(elev);
+    var d = [ce * Math.cos(az), Math.sin(elev), ce * Math.sin(az)];
+    var s = [Math.sin(az), 0, -Math.cos(az)];
+    var nrm = norm(cross(d, s));
+    var step = 0.012, nt = Math.ceil(length / step);
+    for (var k = 1; k <= nt; k++) {
+      var t = k / nt;
+      var c = [base[0] + d[0] * t * length,
+               base[1] + d[1] * t * length - 0.25 * length * t * t,
+               base[2] + d[2] * t * length];
+      var w = width * Math.sin(Math.PI * Math.pow(t, 0.75)) * (1 - 0.25 * t);
+      var ns = Math.max(1, Math.ceil(w * 2 / step));
+      for (var j = 0; j <= ns; j++) {
+        var q = (j / ns * 2 - 1) * w;
+        var vein = Math.abs(q) < 0.011;
+        add(at(c, s, q, s, 0, nrm, Math.abs(q) * 0.5), nrm, COL.leaf, vein ? 1.18 : 0.74 + 0.14 * t);
+      }
+    }
+  }
+
+  function line(a, b, col, sh) {
+    var dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+    var len = Math.sqrt(dx * dx + dy * dy + dz * dz), n = Math.ceil(len / 0.01);
+    for (var i = 0; i <= n; i++) {
+      var t = i / n;
+      add([a[0] + dx * t, a[1] + dy * t, a[2] + dz * t], [0, 1, 0], col, sh);
+    }
+  }
+
+  /* wrapper paper: a cone with a wavy rim and pleats */
+  var TIP = -0.82;
+  function cone(th) { return [0.60 + 0.07 * Math.cos(3 * th + 0.6), -0.10 + 0.08 * Math.sin(2 * th + 1.1)]; }
+  function conePt(th, s) { var c = cone(th); return [s * c[0] * Math.cos(th), TIP + s * (c[1] - TIP), s * c[0] * Math.sin(th)]; }
+  function coneNormal(th) {
+    var c = cone(th), dy = c[1] - TIP, l = Math.sqrt(c[0] * c[0] + dy * dy);
+    return [Math.cos(th) * dy / l, -c[0] / l, Math.sin(th) * dy / l];
+  }
+  (function wrapper() {
+    var nth = 260;
+    for (var i = 0; i < nth; i++) {
+      var th = i / nth * TAU;
+      var c = cone(th), dy = c[1] - TIP, len = Math.sqrt(c[0] * c[0] + dy * dy);
+      var ns = Math.ceil(len / 0.016), nrm = coneNormal(th);
+      var pleat = 0.5 + 0.5 * Math.cos(7 * th);
+      for (var j = 3; j <= ns; j++) {
+        var s = j / ns;
+        var band = s > 0.52 && s < 0.58;
+        var edge = s > 0.965 ? 1.16 : 1;
+        var sh = (0.6 + 0.4 * pleat) * (0.82 + 0.18 * s) * edge;
+        add(conePt(th, s), nrm, band ? COL.white : COL.paper, band ? 0.95 : sh);
+      }
+    }
+    // bow on the ribbon
+    var th0 = Math.PI / 2, s0 = 0.55;
+    var P = conePt(th0, s0), nrm0 = coneNormal(th0), cc = cone(th0);
+    var T = norm([Math.cos(th0) * cc[0], cc[1] - TIP, Math.sin(th0) * cc[0]]);
+    var h = [-Math.sin(th0), 0, Math.cos(th0)];
+    var base = at(P, h, 0, h, 0, nrm0, 0.018);
+    [-1, 1].forEach(function (side) {
+      var lc = at(base, h, side * 0.115, T, 0.005, nrm0, 0.004);
+      ellipse(lc, h, 0.105, T, 0.06, nrm0, COL.white, 1.0, 0.74, 0.011);
+    });
+    [-1, 1].forEach(function (side) {
+      for (var t = 0; t <= 1; t += 0.05) {
+        var tc = at(base, h, side * (0.03 + 0.05 * t), T, -0.04 - 0.2 * t, nrm0, 0.006);
+        ellipse(tc, h, 0.017, T, 0.012, nrm0, COL.white, 0.9, 0.9, 0.009);
+      }
+    });
+    ellipse(at(base, h, 0, T, 0, nrm0, 0.012), h, 0.04, T, 0.04, nrm0, COL.hot, 1, 1, 0.01);
+  })();
+
+  /* flowers sit on a dome above the wrapper */
+  var CEN = [0, 0.1, 0], R = 0.58;
+/* this is where you can edit the middle of the flowers to a color */
+  var TONES = {
+    white: { petal: COL.white, mid: COL.yellow },
+    pink:  { petal: COL.pink,  mid: COL.yellow },
+    hot:   { petal: COL.hot,   mid: COL.yellow }
+  };
+  function dirOf(el, az) { return [Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)]; }
+  function bloom(elDeg, azDeg, len, tone, spin) {
+    var d = dirOf(elDeg * Math.PI / 180, azDeg * Math.PI / 180);
+    var c = [CEN[0] + d[0] * R, CEN[1] + d[1] * R, CEN[2] + d[2] * R];
+    var n = norm([d[0], d[1] + 0.25, d[2]]);
+    flower(c, n, len, TONES[tone].petal, TONES[tone].mid, 8, spin);
+  }
+
+  // leaves and stalks first, they fill the gaps under and between flowers
+  for (var li = 0; li < 10; li++) {
+    var laz = li * TAU / 10 + 0.17;
+    leaf([0.40 * Math.cos(laz), -0.08, 0.40 * Math.sin(laz)], laz, 0.65, 0.42 + rand() * 0.08, 0.1);
+  }
+  for (var si = 0; si < 14; si++) {
+    var sd = dirOf(0.45 + rand() * 0.95, rand() * TAU);
+    line([0, -0.12, 0], [CEN[0] + sd[0] * 0.5, CEN[1] + sd[1] * 0.5, CEN[2] + sd[2] * 0.5], COL.leaf, 0.5);
+  }
+
+  bloom(90, 0, 0.3, "white", 0.2);
+  var ringA = ["pink", "white", "pink", "white", "hot"];
+  for (var a = 0; a < 5; a++) bloom(56, 18 + a * 72, 0.28, ringA[a], a * 0.4);
+  var ringB = ["white", "pink", "white", "pink", "hot", "pink"];
+  for (var b = 0; b < 6; b++) bloom(20, 30 + b * 60, 0.27, ringB[b], b * 0.3 + 0.1);
+
+  // baby's breath poking out around the edge
+  for (var gi = 0; gi < 13; gi++) {
+    var gd = dirOf(0.2 + rand() * 1.0, gi / 13 * TAU + rand() * 0.25);
+    var rad = 0.98 + rand() * 0.06;
+    var g0 = [CEN[0] + gd[0] * 0.55, CEN[1] + gd[1] * 0.55, CEN[2] + gd[2] * 0.55];
+    var g1 = [CEN[0] + gd[0] * rad, CEN[1] + gd[1] * rad, CEN[2] + gd[2] * rad];
+    line(g0, g1, COL.leaf, 0.75);
+    for (var bi = 0; bi < 6; bi++) {
+      var bt = 0.55 + rand() * 0.45;
+      var bp = [g0[0] + (g1[0] - g0[0]) * bt + (rand() - 0.5) * 0.09,
+                g0[1] + (g1[1] - g0[1]) * bt + (rand() - 0.5) * 0.09,
+                g0[2] + (g1[2] - g0[2]) * bt + (rand() - 0.5) * 0.09];
+      for (var pi = 0; pi < 8; pi++) {
+        var pa = rand() * TAU, pz = rand() * 2 - 1, pr = Math.sqrt(1 - pz * pz) * 0.026;
+        add([bp[0] + Math.cos(pa) * pr, bp[1] + pz * 0.026, bp[2] + Math.sin(pa) * pr], gd, COL.white, 1.05);
+      }
+    }
+  }
+
+  var P = new Float32Array(raw);
+  raw = null;
+  var N = P.length / 10;
+
+  /* ---------- render the points into a grid of cells ---------- */
+  var cells = COLS * ROWS;
+  var zbuf = new Float32Array(cells);
+  var hit = new Uint8Array(cells);
+  var cr = new Uint8Array(cells), cg = new Uint8Array(cells), cb = new Uint8Array(cells);
+  var LX = 0.4, LY = 0.6, LZ = 0.7;
+  (function () { var l = Math.sqrt(LX * LX + LY * LY + LZ * LZ); LX /= l; LY /= l; LZ /= l; })();
+
+  function renderGrid(theta, pitch) {
+    zbuf.fill(-1e9);
+    hit.fill(0);
+    var cy = Math.cos(theta), sy = Math.sin(theta), cp = Math.cos(pitch), sp = Math.sin(pitch);
+    var cx0 = (COLS - 1) / 2, cy0 = ROWS / 2;
+    for (var i = 0; i < N; i++) {
+      var o = i * 10;
+      var x = P[o], y = P[o + 1], z = P[o + 2];
+      var x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+      var y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
+      var f = CAM / (CAM - z2);
+      var col = Math.round(cx0 + x1 * f * SCALE);
+      var row = Math.round(cy0 - (y2 * f - 0.12) * SCALE);
+      if (col < 0 || col >= COLS || row < 0 || row >= ROWS) continue;
+      var idx = row * COLS + col;
+      if (z2 <= zbuf[idx]) continue;
+      zbuf[idx] = z2;
+      var nx = P[o + 3], ny = P[o + 4], nz = P[o + 5];
+      var nx1 = nx * cy + nz * sy, nz1 = -nx * sy + nz * cy;
+      var ny2 = ny * cp - nz1 * sp, nz2 = ny * sp + nz1 * cp;
+      var d = nx1 * LX + ny2 * LY + nz2 * LZ;
+      var k = P[o + 9] * (0.74 + 0.3 * (d > 0 ? d : 0)) + 0.04;
+      var r = P[o + 6] * k, g = P[o + 7] * k, b = P[o + 8] * k;
+      cr[idx] = r > 255 ? 255 : r;
+      cg[idx] = g > 255 ? 255 : g;
+      cb[idx] = b > 255 ? 255 : b;
+      hit[idx] = 1;
+    }
+  }
+
+  /* ---------- canvas, digits, animation ---------- */
+  var canvas = document.getElementById("bouquet");
+  var ctx = canvas.getContext("2d");
+  var CELL = 8;
+  var phase = new Float32Array(cells), rate = new Float32Array(cells);
+  for (var ci = 0; ci < cells; ci++) { phase[ci] = rand(); rate[ci] = 0.12 + rand() * 0.5; }
+
+  function resize() {
+    var dpr = window.devicePixelRatio || 1;
+    var availW = Math.max(200, Math.min(window.innerWidth - 32, 600));
+    var availH = Math.max(300, window.innerHeight - 190);
+    var cell = Math.min(availW / COLS, availH / ROWS);
+    CELL = Math.max(4, Math.floor(cell * dpr));
+    canvas.width = COLS * CELL;
+    canvas.height = ROWS * CELL;
+    canvas.style.width = (COLS * CELL / dpr) + "px";
+    canvas.style.height = (ROWS * CELL / dpr) + "px";
+  }
+
+  function draw(clock) {
+    var W = canvas.width, H = canvas.height;
+    ctx.fillStyle = INK;
+    ctx.fillRect(0, 0, W, H);
+    ctx.font = CELL + 'px "Press Start 2P", ui-monospace, "Courier New", monospace';
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    var half = CELL / 2 + CELL * 0.04;
+    ctx.fillStyle = "rgba(255,134,189,0.075)";
+    for (var i = 0; i < cells; i++) {
+      if (hit[i]) continue;
+      var ch = (Math.floor(clock * rate[i] + phase[i] * 2) & 1) ? "1" : "0";
+      ctx.fillText(ch, (i % COLS) * CELL, Math.floor(i / COLS) * CELL + half);
+    }
+    for (var j = 0; j < cells; j++) {
+      if (!hit[j]) continue;
+      var d = (Math.floor(clock * rate[j] + phase[j] * 2) & 1) ? "1" : "0";
+      ctx.fillStyle = "rgb(" + cr[j] + "," + cg[j] + "," + cb[j] + ")";
+      ctx.fillText(d, (j % COLS) * CELL, Math.floor(j / COLS) * CELL + half);
+    }
+  }
+
+  var reduce = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  var paused = reduce, clock = 0, last = 0;
+
+  function frame(ts) {
+    var dt = last ? Math.min(0.05, (ts - last) / 1000) : 0;
+    last = ts;
+    if (!paused) clock += dt;
+    if (shown !== target) {
+      acc += dt * 28;
+      var step = Math.floor(acc);
+      if (step > 0) {
+        acc -= step;
+        shown = target > shown ? Math.min(target, shown + step) : Math.max(target, shown - step);
+        paintBin();
+      }
+    }
+    renderGrid(0.5 + clock * SPIN, PITCH + 0.035 * Math.sin(clock * 1.3));
+    draw(clock);
+    requestAnimationFrame(frame);
+  }
+
+  document.getElementById("msg").textContent = MESSAGE;
+  // The binary line: each letter of SECRET as its 8-bit code. The decode button turns it back into text.
+  var codes = SECRET.split("").map(function (c) {
+    var bits = c.charCodeAt(0).toString(2);
+    return ("00000000" + bits).slice(-Math.max(8, bits.length));
+  });
+  var binEl = document.getElementById("bin");
+  var doneEl = document.createElement("span");
+  var restEl = document.createElement("span");
+  doneEl.className = "done";
+  binEl.appendChild(doneEl);
+  binEl.appendChild(document.createTextNode(" "));
+  binEl.appendChild(restEl);
+  var shown = 0, target = 0, acc = 0;
+  function paintBin() {
+    doneEl.textContent = SECRET.slice(0, shown);
+    restEl.textContent = codes.slice(shown).join(" ");
+    binEl.setAttribute("aria-hidden", shown === 0 ? "true" : "false");
+  }
+  paintBin();
+  var decodeBtn = document.getElementById("decode");
+  decodeBtn.addEventListener("click", function () {
+    target = target === 0 ? codes.length : 0;
+    decodeBtn.textContent = target ? "encode" : "decode";
+    if (reduce) { shown = target; paintBin(); }
+  });
+
+  window.addEventListener("resize", resize);
+  resize();
+  requestAnimationFrame(frame);
+  if (document.fonts && document.fonts.load) {
+    document.fonts.load('16px "Press Start 2P"').catch(function () {});
+  }
+})();
+</script>
+
+</body>
+</html>
